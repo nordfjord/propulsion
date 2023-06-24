@@ -1,0 +1,7 @@
+﻿<wpf:ResourceDictionary xml:space="preserve" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:s="clr-namespace:System;assembly=mscorlib" xmlns:ss="urn:shemas-jetbrains-com:settings-storage-xaml" xmlns:wpf="http://schemas.microsoft.com/winfx/2006/xaml/presentation">
+	<s:String x:Key="/Default/Environment/UnitTesting/UnitTestSessionStore/Sessions/=101809dc_002D00a1_002D48a8_002Da0f1_002D4e3ec4e4e64e/@EntryIndexedValue">&lt;SessionState ContinuousTestingMode="0" IsActive="True" Name="All tests from &amp;lt;Propulsion.MessageDb.Integration&amp;gt;" xmlns="urn:schemas-jetbrains-com:jetbrains-ut-session"&gt;
+  &lt;Or&gt;
+    &lt;Project Location="/Users/einarnordfjord/git/nordfjord/propulsion/tests/Propulsion.MessageDb.Integration" Presentation="&amp;lt;Propulsion.MessageDb.Integration&amp;gt;" /&gt;
+    &lt;Project Location="/Users/einarnordfjord/git/nordfjord/propulsion/tests/Propulsion.Tests" Presentation="&amp;lt;Propulsion.Tests&amp;gt;" /&gt;
+  &lt;/Or&gt;
+&lt;/SessionState&gt;</s:String></wpf:ResourceDictionary>
