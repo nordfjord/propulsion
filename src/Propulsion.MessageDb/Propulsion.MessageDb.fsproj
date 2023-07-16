@@ -6,8 +6,8 @@
 
     <ItemGroup>
         <Compile Include="Types.fs" />
-        <Compile Include="MessageDbSource.fs" />
         <Compile Include="ReaderCheckpoint.fs" />
+        <Compile Include="MessageDbSource.fs" />
         <None Include="Readme.md" />
     </ItemGroup>
     

@@ -8,6 +8,7 @@ open Propulsion.Internal
 open System
 open System.Threading
 open System.Threading.Tasks
+open ReaderCheckpoint
 
 module private GetCategoryMessages =
     [<Literal>]
@@ -30,11 +31,6 @@ module private GetLastPosition =
         cmd
 
 module Internal =
-    let createConnectionAndOpen connectionString ct = task {
-        let conn = new NpgsqlConnection(connectionString)
-        do! conn.OpenAsync(ct)
-        return conn }
-
     let private jsonNull = ReadOnlyMemory(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(null))
 
     type System.Data.Common.DbDataReader with
@@ -43,7 +39,7 @@ module Internal =
             else reader.GetString(idx) |> Text.Encoding.UTF8.GetBytes |> ReadOnlyMemory
 
     type MessageDbCategoryClient(connectionString) =
-        let connect = createConnectionAndOpen connectionString
+        let connect = Internal.createConnectionAndOpen connectionString
         let parseRow (reader: System.Data.Common.DbDataReader) =
             let et, data, meta = reader.GetString(1), reader.GetJson 2, reader.GetJson 3
             let sz = data.Length + meta.Length + et.Length
@@ -111,17 +107,58 @@ type MessageDbSource internal
     default x.Start() = base.Start(x.Pump)
 
     /// Pumps to the Sink until either the specified timeout has been reached, or all items in the Source have been fully consumed
-    member x.RunUntilCaughtUp(timeout : TimeSpan, statsInterval : IntervalTimer) = task {
-        let sw = Stopwatch.start ()
+    member x.RunUntilCaughtUp(timeout : TimeSpan) = task {
         use pipeline = x.Start()
 
-        try Task.Delay(timeout).ContinueWith(fun _ -> pipeline.Stop()) |> ignore
+        Task.Delay(timeout).ContinueWith(fun _ -> pipeline.Stop()) |> ignore
 
-            let initialReaderTimeout = TimeSpan.FromMinutes 1.
-            do! pipeline.Monitor.AwaitCompletion(initialReaderTimeout, awaitFullyCaughtUp = true, logInterval = TimeSpan.FromSeconds 30)
-            pipeline.Stop()
+        let initialReaderTimeout = TimeSpan.FromMinutes 1.
+        do! pipeline.Monitor.AwaitCompletion(initialReaderTimeout, awaitFullyCaughtUp = true, logInterval = TimeSpan.FromSeconds 30)
+        pipeline.Stop()
 
-            if sw.ElapsedSeconds > 2 then statsInterval.Trigger()
-            // force a final attempt to flush anything not already checkpointed (normally checkpointing is at 5s intervals)
-            return! x.Checkpoint(CancellationToken.None)
-        finally statsInterval.SleepUntilTriggerCleared() }
+        // force a final attempt to flush anything not already checkpointed (normally checkpointing is at 5s intervals)
+        return! x.Checkpoint(CancellationToken.None) }
+
+    static member Configure(
+        log,
+        categories,
+        handleEvents,
+        subscriptionId,
+        storeConnectionString,
+        checkpointConnectionString,
+        ?checkpointSchema,
+        ?tailSleepInterval,
+        ?maxReadAhead,
+        ?maxConcurrentStreams
+    ) =
+       let maxReadAhead = defaultArg maxReadAhead 100
+       let maxConcurrentStreams = defaultArg maxConcurrentStreams 10
+       let checkpointSchema = defaultArg checkpointSchema "public"
+       let tailSleepInterval = defaultArg tailSleepInterval (TimeSpan.FromSeconds 1)
+       let sinkStats =
+          { new Propulsion.Streams.Stats<_>(log, TimeSpan.FromMinutes 1, TimeSpan.FromMinutes 1) with
+              override _.HandleOk(_) = ()
+
+              override _.HandleExn(_log, x) = () }
+
+       let sink = Propulsion.Sinks.Factory.StartConcurrent(
+           log,
+           maxReadAhead = maxReadAhead,
+           maxConcurrentStreams = maxConcurrentStreams,
+           handle = handleEvents,
+           stats = sinkStats
+           )
+
+       let checkpoints = CheckpointStore(checkpointConnectionString, checkpointSchema, subscriptionId, TimeSpan.FromMinutes 5)
+       let source =
+           MessageDbSource(
+               log,
+               statsInterval = TimeSpan.FromSeconds 15,
+               connectionString = storeConnectionString,
+               batchSize = 1000,
+               tailSleepInterval = tailSleepInterval,
+               checkpoints = checkpoints,
+               sink = sink,
+               categories = categories)
+
+       source, sink

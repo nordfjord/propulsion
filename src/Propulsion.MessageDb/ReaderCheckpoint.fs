@@ -7,6 +7,13 @@ open Propulsion.Feed
 open Propulsion.Internal
 open System.Threading
 
+module Internal =
+    let createConnectionAndOpen connectionString ct = task {
+        let conn = new NpgsqlConnection(connectionString)
+        do! conn.OpenAsync(ct)
+        return conn }
+
+
 let [<Literal>] TableName = "propulsion_checkpoint"
 
 module internal Impl =

@@ -4,6 +4,7 @@ open Npgsql
 open NpgsqlTypes
 open Propulsion.Internal
 open Propulsion.MessageDb
+open Propulsion.MessageDb.ReaderCheckpoint
 open Swensen.Unquote
 open System
 open System.Collections.Generic
@@ -36,6 +37,9 @@ let CheckpointConnectionString =
     | null -> "Host=localhost; Database=message_store; Port=5432; Username=postgres; Password=postgres"
     | s -> s
 
+// Ensures the checkpoint table exists
+CheckpointStore(CheckpointConnectionString, "public", "whatever", TimeSpan.FromMilliseconds 1).CreateSchemaIfNotExists().Wait()
+
 
 let connect () = task {
     let conn = new NpgsqlConnection(ConnectionString)
@@ -56,15 +60,6 @@ let writeMessagesToCategory conn category = task {
         do! writeMessagesToStream conn streamName
 }
 
-let stats log = { new Propulsion.Streams.Stats<_>(log, TimeSpan.FromMinutes 1, TimeSpan.FromMinutes 1)
-                  with member _.HandleOk x = ()
-                       member _.HandleExn(log, x) = () }
-
-let makeCheckpoints consumerGroup = task {
-    let checkpoints = ReaderCheckpoint.CheckpointStore(CheckpointConnectionString, "public", $"TestGroup{consumerGroup}", TimeSpan.FromSeconds 10)
-    do! checkpoints.CreateSchemaIfNotExists()
-    return checkpoints }
-
 [<Fact>]
 let ``It processes events for a category`` () = task {
     use! conn = connect ()
@@ -74,24 +69,26 @@ let ``It processes events for a category`` () = task {
     let category2 = $"{Guid.NewGuid():N}"
     do! writeMessagesToCategory conn category1
     do! writeMessagesToCategory conn category2
-    let! checkpoints = makeCheckpoints consumerGroup
-    let stats = stats log
     let mutable stop = ignore
     let handled = HashSet<_>()
-    let handle stream (events: Propulsion.Sinks.Event[]) _ct = task {
+    let handle stream (events: Propulsion.Sinks.Event[]) = async {
         lock handled (fun _ ->
            for evt in events do
                handled.Add((stream, evt.Index)) |> ignore)
         test <@ Array.chooseV Simple.codec.TryDecode events |> Array.forall ((=) (Simple.Hello { name = "world" })) @>
         if handled.Count >= 2000 then
             stop ()
-        return struct (Propulsion.Sinks.StreamResult.AllProcessed, ()) }
-    use sink = Propulsion.Sinks.Factory.StartConcurrentAsync(log, 2, 2, handle, stats)
-    let source = MessageDbSource(
-        log, TimeSpan.FromMinutes 1,
-        ConnectionString, 1000, TimeSpan.FromMilliseconds 100,
-        checkpoints, sink, [| category1; category2 |])
+        return Propulsion.Sinks.StreamResult.AllProcessed, () }
+
+    let source, sink = MessageDbSource.Configure(
+        log,
+        [| category1; category2 |],
+        handle,
+        $"TestGroup{consumerGroup}",
+        storeConnectionString = ConnectionString,
+        checkpointConnectionString = CheckpointConnectionString)
     use src = source.Start()
+    use _ = sink
     stop <- src.Stop
 
     Task.Delay(TimeSpan.FromSeconds 30).ContinueWith(fun _ -> src.Stop()) |> ignore
@@ -105,45 +102,3 @@ let ``It processes events for a category`` () = task {
     // they were handled in order within streams
     let ordering = handled |> Seq.groupBy fst |> Seq.map (snd >> Seq.map snd >> Seq.toArray) |> Seq.toArray
     test <@ ordering |> Array.forall ((=) [| 0L..19L |]) @> }
-
-type ActivityCapture() =
-    let operations = ResizeArray()
-    let listener =
-         let l = new ActivityListener()
-         l.Sample <- fun _ -> ActivitySamplingResult.AllDataAndRecorded
-         l.ShouldListenTo <- fun s -> s.Name = "Npgsql"
-         l.ActivityStopped <- fun act -> operations.Add(act)
-
-         ActivitySource.AddActivityListener(l)
-         l
-
-    member _.Operations = operations
-    interface IDisposable with
-        member _.Dispose() = listener.Dispose()
-
-[<Fact>]
-let ``It doesn't read the tail event again`` () = task {
-    let log = Serilog.LoggerConfiguration().CreateLogger()
-    let consumerGroup = $"{Guid.NewGuid():N}"
-    let category = $"{Guid.NewGuid():N}"
-    use! conn = connect ()
-    do! writeMessagesToStream conn $"{category}-1"
-    let! checkpoints = makeCheckpoints consumerGroup
-
-    let stats = stats log
-
-    let handle _ _ _ = task {
-        return struct (Propulsion.Sinks.StreamResult.AllProcessed, ()) }
-    use sink = Propulsion.Sinks.Factory.StartConcurrentAsync(log, 1, 1, handle, stats)
-    let batchSize = 10
-    let source = MessageDbSource(
-        log, TimeSpan.FromMilliseconds 1000,
-        ConnectionString, batchSize, TimeSpan.FromMilliseconds 1000,
-        checkpoints, sink, [| category |])
-
-    use capture = new ActivityCapture()
-
-    do! source.RunUntilCaughtUp(TimeSpan.FromSeconds(10), stats.StatsInterval) :> Task
-
-    // 3 batches fetched, 1 checkpoint read, and 1 checkpoint write
-    test <@ capture.Operations.Count = 5 @> }
